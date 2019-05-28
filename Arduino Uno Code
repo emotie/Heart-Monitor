@@ -1,5 +1,5 @@
-int pinSensor = A0;                                     /*****ECG sensor pin*****/
-int potentiometer = A3;                                 /*****potentiometer pin**/
+int pinSensor = A1;                                     /*****ECG sensor pin*****/
+int potentiometer = A0;                                 /*****potentiometer pin**/
 
 /********************************************************
  *                    OLED SETUP                         *
