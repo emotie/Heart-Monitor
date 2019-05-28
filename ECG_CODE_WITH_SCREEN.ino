@@ -1,0 +1,247 @@
+int pinSensor = A0;                                     /*****ECG sensor pin*****/
+int potentiometer = A3;                                 /*****potentiometer pin**/
+
+/********************************************************
+ *                    OLED SETUP                         *
+ ********************************************************/
+
+#include <Adafruit_SSD1306.h>
+#include <Adafruit_GFX.h>
+#define OLED_ADDR   0x3C
+Adafruit_SSD1306 display(-1);
+#if (SSD1306_LCDHEIGHT != 32)
+#error("Height incorrect, please fix Adafruit_SSD1306.h!");
+#endif
+
+/********************************************************
+ *        Running Average Filter Variables              *
+ ********************************************************/
+ 
+const int numSamples = 6;                               //sample array size
+int average = 0;                                        //the average variable
+int samples[numSamples];                                //array to store samples for average calculation
+int total = 0; 
+int r;
+
+
+/********************************************************
+ *                  BPM Variables                       *
+ ********************************************************/
+ 
+unsigned long time1;                                    //variable to record when the pulse exceeds the threshold
+unsigned long time2;                                    //variable to record when the pulse returns below the threshold
+unsigned long peakCurrent;                              //current pulse peak variable
+unsigned long peakPrevious;                             //previous pulse peak variable
+unsigned long period;                                   //time period between current and previous peaks
+unsigned long BPM = 0;                                  //heart rate variable
+int state = 1;                                          //variable to determine which 'state' the pulse is in
+
+int threshold = 380;
+int thresholdHigh = threshold + 10;
+int thresholdLow = threshold - 10;
+unsigned long timer;
+
+/********************************************************
+ *                   BPM Average                        *
+ ********************************************************/
+
+int totalBPM = 0;
+const int indexBPM = 20;
+int arrayBPM[indexBPM];
+int iBPM = 0;
+int averageBPM;
+
+/********************************************************/
+
+
+void setup() {
+  Serial.begin(115200);      
+  
+  pinMode(pinSensor, INPUT);          
+  pinMode(potentiometer, INPUT);      
+  
+  display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR);   
+  display.clearDisplay();
+  display.display();
+  
+  zeroArray(samples, numSamples);                       //sets all elements of both arrays to 0
+  zeroArray(arrayBPM, indexBPM);
+
+}
+
+void loop() {
+/*
+ * state 1 is the running state
+ * the ECG is in state 1 most of the time
+ * the ECG does not move to state 2 unless there is a peak
+ */
+      
+  while(state == 1){                                    
+    while(analogRead(pinSensor) < threshold){           //while the ECG sensor reads below the threshold set by the potentiometer
+      r = analogRead(pinSensor);                        //puts sensor value into a variable for the following function
+      filter(samples, numSamples, r, &total);           //moving average function
+      average = total / numSamples;                     //calculates the average, requires 6 readings to become accurate
+      
+      threshold = analogRead(potentiometer);            //sets threshold to the potentiometer value
+      thresholdLow = threshold - 10;                    //sets lower threshold for implementation of hysteresis to minimise false readings 
+      thresholdHigh = threshold + 10;                   //upper threshold
+      delay(3);                                         //delay to minimise 50 Hz noise
+      
+      Serial.print(threshold);                          //allows threshold to be seen on serial plotter for ease of setting for user
+      Serial.print('\t');
+      Serial.println(average);                          //allows user to see ECG waveform on serial plotter
+    }
+    state = 2;                                          //threshold exceeded, move to next state to begin detecting heart rate
+  }
+  
+  while(state == 2){                                    //state 2 records the time the threshold has been exceeded and moves on
+    time1 = millis();                                   //records the first time variable for the period calculation
+    state = 3;                                          //immediately moves to state 3 after recording the time
+  }
+ /*
+  * state 3 exists when the sensor value is between the threshold and upper threshold
+  * this state acts as a buffer by introducing an upper threshold to minimise false readings
+  * the sensor value may drop back below the threshold before reaching its peak due to noise distorting the signal waveform
+  * this would cause a false time reading impacting the accuracy of heart rate calculations
+  * until the upper threshold has been exceeded any crossing of the threshold is ignored
+  * the code is similar to state 1
+  * see state 1 for comments on what each line of code does in state 3
+  */
+  while(state == 3){ 
+    while(analogRead(pinSensor) < thresholdHigh){       //while sensor value is below the upper threshold
+      
+      r = analogRead(pinSensor);              
+      filter(samples, numSamples, r, &total);
+      average = total / numSamples;
+      
+      threshold = analogRead(potentiometer);
+      thresholdLow = threshold - 10;
+      thresholdHigh = threshold + 10;
+      delay(3);
+    
+      Serial.print(threshold);
+      Serial.print('\t');
+      Serial.println(average);   
+    }
+    state = 4;                                          //move to state 4 now that the sensor value has exceeded the upper threshold
+  }
+
+/*
+ * state 4 begins when the upper threshold has been exceeded
+ * it continues to run until the signal drops below the threshold again
+ * the code is similar to state 1
+ * see state 1 for comments on what each line of code does in state 4
+ */
+
+  while(state == 4){ 
+    while(analogRead(pinSensor) > threshold){
+      r = analogRead(pinSensor);
+      filter(samples, numSamples, r, &total);
+      average = total / numSamples;
+      
+      threshold = analogRead(potentiometer);
+      thresholdLow = threshold - 10;
+      thresholdHigh = threshold + 10;
+      delay(3);
+      
+      Serial.print(threshold);
+      Serial.print('\t');
+      Serial.println(average);
+    }
+    state = 5;                                          //move to state 5 now that the sensor value is below the threshold again
+  }
+  
+  while(state == 5){                                    //state 5 records the time the sensor value drops below the threshold, performs calculations, then moves on
+    time2 = millis();                                   //records second time variable for when the sensor value dropped back below the lower threshold
+    peakCurrent = (time1 + time2) / 2;                  //calculates the average of the time to estimate the time of the peak
+    period = peakCurrent - peakPrevious;                //calculates the period between the current peak and previous peak
+    BPM = 60000 / period;                               //calculates the heart rate from the current period
+  
+/***************************************************************
+ *               RUNNING AVERAGE BPM SECTION                   *
+ ***************************************************************/
+  // Average BPM to minimise fluctuations in readings
+      
+    totalBPM = totalBPM - arrayBPM[iBPM];               //does nothing until the array is filled as all array elements were set to 0, it removes the old element value from the total
+    arrayBPM[iBPM] = BPM;                               //replaces the old reading that was removed with the new reading
+    totalBPM = totalBPM + arrayBPM[iBPM];               //adds the new element value to total
+    iBPM++;                                             //increment index being read
+    
+    if(iBPM >= indexBPM){                               //if the array is at the end, start again
+      iBPM = 0;
+    }
+    averageBPM = totalBPM / indexBPM;                   //average BPM calculation  
+
+/***************************************************************/
+
+    timer = millis();                                   //timer variable for if statement
+    if (timer < 20000){                                 //for the first 20 seconds
+    Serial.println(averageBPM);                         //prints BPM to assist in setting threshold with potentiometer (causes spikes on plotter when a heart beat is detected)
+    }
+    
+    peakPrevious = peakCurrent;                         //shift current peak time to previous to calculate the next period
+
+/*
+ * displays BPM to the OLED screen
+ */
+    display.setTextSize(2);
+    display.setCursor(10,10); 
+    display.setTextColor(WHITE, BLACK);
+    display.print("BPM:");
+    display.setCursor(60,10); 
+    display.print(averageBPM);
+    if(averageBPM < 100){
+      display.setCursor(83,10);
+      display.print("  ");                              //clears trailing numbers if BPM drops below 100 from above 100
+    }
+    display.display();
+    state = 6;                                          //move immediately to state 6 once calculations are complete
+  }
+
+ /*
+  * state 6 exists when the sensor value is between the threshold and lower threshold
+  * this state acts as a buffer by introducing a lower threshold to minimise false readings
+  * the sensor value may cross back over the threshold due to noise distorting the signal waveform
+  * until the sensor value drops below the lower threshold, any crossing of the threshold is ignored
+  * state 6 is the final state before returning to state 1
+  * the code is similar to state 1
+  * see state 1 for comments on what each line of code does in state 6
+  */
+  while(state == 6){                              
+    while(analogRead(pinSensor) > thresholdLow){        //while the sensor value greater than the lower threshold
+      r = analogRead(pinSensor);
+      filter(samples, numSamples, r, &total);
+      average = total / numSamples;
+      
+      threshold = analogRead(potentiometer);
+      thresholdLow = threshold - 10;
+      thresholdHigh = threshold + 10;
+      delay(3);
+      
+      Serial.print(threshold);
+      Serial.print('\t');
+      Serial.println(average);
+    }
+    state = 1;                                          //now that the sensor value has dropped below the lower threshold again, the next peak can be recorded. 
+                                                        //reset back to state 1
+  }
+}
+
+/* Function to set all elements of the array to 0 */ 
+void zeroArray(int *array, int indexTotal){
+  int i;
+  for(i = 0; i <= indexTotal; i++)
+    array[i] = 0;
+}
+
+/* Running average filter function */
+void filter(int *samples, int numSamples, int r, int *total){
+  static int i = 0;
+  *total = *total - samples[i];
+  samples[i] = r;
+  *total = *total + samples[i];
+  i++;
+  if(i >= numSamples){
+    i = 0;
+  }
+}
